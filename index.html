@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Valorant Mini 3D - Botlu FPS</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: 'Segoe UI', Tahoma, sans-serif; }
+
+    #game-container { width: 100vw; height: 100vh; position: relative; }
+
+    /* HUD / UI */
+    #crosshair {
+      position: absolute; top: 50%; left: 50%;
+      width: 10px; height: 10px;
+      transform: translate(-50%, -50%);
+      pointer-events: none; z-index: 10;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute; background: #00ffcc;
+    }
+    #crosshair::before { top: 4px; left: -8px; width: 26px; height: 2px; }
+    #crosshair::after { top: -8px; left: 4px; width: 2px; height: 26px; }
+
+    #hud {
+      position: absolute; bottom: 20px; left: 20px; right: 20px;
+      display: flex; justify-content: space-between; align-items: flex-end;
+      pointer-events: none; z-index: 10; color: white;
+    }
+
+    .hud-box {
+      background: rgba(15, 25, 35, 0.85);
+      border: 2px solid #ff4655;
+      padding: 15px 25px; border-radius: 8px;
+      backdrop-filter: blur(5px);
+    }
+
+    .health-bar-bg { width: 200px; height: 16px; background: #333; margin-top: 5px; border-radius: 4px; overflow: hidden; }
+    .health-bar-fill { width: 100%; height: 100%; background: #ff4655; transition: width 0.1s; }
+
+    #flash-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: white; opacity: 0; pointer-events: none; z-index: 20;
+      transition: opacity 0.1s ease-out;
+    }
+
+    #blocker {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 25, 35, 0.9); display: flex;
+      flex-direction: column; justify-content: center; align-items: center;
+      color: white; z-index: 30; cursor: pointer;
+    }
+    #blocker h1 { font-size: 48px; color: #ff4655; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 2px; }
+    #blocker p { font-size: 18px; color: #ece8e1; }
+
+    .ability { display: inline-block; margin-right: 10px; padding: 5px 10px; background: rgba(255,255,255,0.1); border-radius: 4px; }
+    .ability span { color: #ff4655; font-weight: bold; }
+  </style>
+  <!-- Three.js (3D Grafik Motoru) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+  <div id="game-container">
+    <div id="crosshair"></div>
+    <div id="flash-overlay"></div>
+
+    <div id="hud">
+      <div class="hud-box">
+        <div style="font-size: 14px; color: #8b978f;">SAĞLIK</div>
+        <div id="hp-text" style="font-size: 28px; font-weight: bold;">100</div>
+        <div class="health-bar-bg"><div id="hp-bar" class="health-bar-fill"></div></div>
+      </div>
+
+      <div class="hud-box" style="text-align: center;">
+        <div class="ability"><span>Q</span> DUMAN</div>
+        <div class="ability"><span>E</span> FLAŞ</div>
+        <div class="ability"><span>R</span> DOLDUR</div>
+      </div>
+
+      <div class="hud-box" style="text-align: right;">
+        <div style="font-size: 14px; color: #8b978f;">MERMİ / SKOR</div>
+        <div style="font-size: 28px; font-weight: bold;"><span id="ammo-text">30</span> / <span id="score-text" style="color: #ff4655;">0 SKOR</span></div>
+      </div>
+    </div>
+
+    <div id="blocker">
+      <h1>VALORANT MINI 3D</h1>
+      <p>Oyuna Başlamak İçin Ekrana Tıkla</p>
+      <div style="margin-top: 20px; font-size: 14px; opacity: 0.7;">
+        [WASD] Hareket | [Mouse] Nişan | [Sol Tık] Ateş | [Q] Duman | [E] Flaş | [R] Şarjör
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- OYUN DEĞİŞKENLERİ VE KURULUM ---
+    let scene, camera, renderer;
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+    let prevTime = performance.now();
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+
+    let hp = 100, ammo = 30, score = 0;
+    let bots = [], bullets = [], smokes = [];
+    let isLocked = false;
+
+    const blocker = document.getElementById('blocker');
+
+    // Web Audio API (Sesler)
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(freq, duration, type='square') {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + duration);
+    }
+
+    function init() {
+      // 1. Sahne Oluştur
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0f1923);
+      scene.fog = new THREE.FogExp2(0x0f1923, 0.015);
+
+      // 2. Kamera
+      camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.y = 1.6; // Oyuncu boyu
+
+      // 3. Işıklar
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+      scene.add(ambientLight);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(20, 40, 20);
+      scene.add(dirLight);
+
+      // 4. Harita Zemin ve Siperler
+      const floorGeo = new THREE.PlaneGeometry(100, 100);
+      const floorMat = new THREE.MeshStandardMaterial({ color: 0x2b3a4a, roughness: 0.8 });
+      const floor = new THREE.Mesh(floorGeo, floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      scene.add(floor);
+
+      // Haritaya Kutular / Siperler Ekle
+      const boxGeo = new THREE.BoxGeometry(3, 3, 3);
+      const boxMat = new THREE.MeshStandardMaterial({ color: 0xff4655 });
+      for (let i = 0; i < 15; i++) {
+        const box = new THREE.Mesh(boxGeo, boxMat);
+        box.position.set((Math.random() - 0.5) * 60, 1.5, (Math.random() - 0.5) * 60);
+        scene.add(box);
+      }
+
+      // 5. Botları Oluştur
+      for (let i = 0; i < 5; i++) spawnBot();
+
+      // 6. Renderer
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.getElementById('game-container').appendChild(renderer.domElement);
+
+      // Etkileşimler
+      blocker.addEventListener('click', () => {
+        document.body.requestPointerLock();
+      });
+
+      document.addEventListener('pointerlockchange', () => {
+        if (document.pointerLockElement === document.body) {
+          isLocked = true;
+          blocker.style.display = 'none';
+        } else {
+          isLocked = false;
+          blocker.style.display = 'flex';
+        }
+      });
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('keydown', onKeyDown);
+      document.addEventListener('keyup', onKeyUp);
+      document.addEventListener('mousedown', onMouseDown);
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    // --- BOT YAPAY ZEKASI (SPAWN & BEHAVIOR) ---
+    function spawnBot() {
+      const botGroup = new THREE.Group();
+      
+      // Gövde
+      const bodyGeo = new THREE.CylinderGeometry(0.5, 0.5, 1.8);
+      const bodyMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      body.position.y = 0.9;
+      botGroup.add(body);
+
+      // Kafa (Kırmızı Valorant Düşman Işığı)
+      const headGeo = new THREE.SphereGeometry(0.35);
+      const headMat = new THREE.MeshBasicMaterial({ color: 0xff4655 });
+      const head = new THREE.Mesh(headGeo, headMat);
+      head.position.y = 1.8;
+      botGroup.add(head);
+
+      botGroup.position.set((Math.random() - 0.5) * 70, 0, (Math.random() - 0.5) * 70);
+      scene.add(botGroup);
+
+      bots.push({
+        mesh: botGroup,
+        hp: 100,
+        lastShoot: 0
+      });
+    }
+
+    // --- FARE VE HAREKET ---
+    let pitch = 0, yaw = 0;
+    function onMouseMove(e) {
+      if (!isLocked) return;
+      yaw -= e.movementX * 0.002;
+      pitch -= e.movementY * 0.002;
+      pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, pitch));
+
+      camera.rotation.order = 'YXZ';
+      camera.rotation.y = yaw;
+      camera.rotation.x = pitch;
+    }
+
+    function onKeyDown(e) {
+      switch (e.code) {
+        case 'KeyW': moveForward = true; break;
+        case 'KeyS': moveBackward = true; break;
+        case 'KeyA': moveLeft = true; break;
+        case 'KeyD': moveRight = true; break;
+        case 'Space': if (canJump) velocity.y += 10; canJump = false; break;
+        case 'KeyQ': useSmoke(); break;
+        case 'KeyE': useFlash(); break;
+        case 'KeyR': ammo = 30; document.getElementById('ammo-text').innerText = ammo; playSound(400, 0.2); break;
+      }
+    }
+
+    function onKeyUp(e) {
+      switch (e.code) {
+        case 'KeyW': moveForward = false; break;
+        case 'KeyS': moveBackward = false; break;
+        case 'KeyA': moveLeft = false; break;
+        case 'KeyD': moveRight = false; break;
+      }
+    }
+
+    // --- ATEŞ ETME VE YETENEKLER ---
+    function onMouseDown(e) {
+      if (!isLocked || e.button !== 0 || ammo <= 0) return;
+      ammo--;
+      document.getElementById('ammo-text').innerText = ammo;
+      playSound(800, 0.05);
+
+      // Raycast ile Nişan Hattında Düşman Vurma
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+
+      const botMeshes = bots.map(b => b.mesh);
+      const intersects = raycaster.intersectObjects(botMeshes, true);
+
+      if (intersects.length > 0) {
+        let hitObject = intersects[0].object;
+        while (hitObject.parent && hitObject.parent !== scene) hitObject = hitObject.parent;
+
+        const botIndex = bots.findIndex(b => b.mesh === hitObject);
+        if (botIndex !== -1) {
+          playSound(1200, 0.1, 'sine'); // Vuruş Sesi (Headshot/Hit)
+          bots[botIndex].hp -= 50;
+          if (bots[botIndex].hp <= 0) {
+            scene.remove(bots[botIndex].mesh);
+            bots.splice(botIndex, 1);
+            score += 100;
+            document.getElementById('score-text').innerText = score + " SKOR";
+            setTimeout(spawnBot, 2000); // Yeni bot doğsun
+          }
+        }
+      }
+    }
+
+    // Q Yeteneği: Duman Bombası
+    function useSmoke() {
+      playSound(300, 0.3, 'sine');
+      const smokeGeo = new THREE.SphereGeometry(6, 16, 16);
+      const smokeMat = new THREE.MeshBasicMaterial({ color: 0x555555, transparent: true, opacity: 0.75 });
+      const smoke = new THREE.Mesh(smokeGeo, smokeMat);
+      
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      smoke.position.copy(camera.position).add(dir.multiplyScalar(10));
+      smoke.position.y = 3;
+      scene.add(smoke);
+    }
+
+    // E Yeteneği: Flaş
+    function useFlash() {
+      playSound(1500, 0.2, 'triangle');
+      const flashOverlay = document.getElementById('flash-overlay');
+      flashOverlay.style.opacity = '1';
+      setTimeout(() => { flashOverlay.style.opacity = '0'; }, 1500);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // --- DÖNGÜ VE GÜNCELLEME ---
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const time = performance.now();
+      const delta = (time - prevTime) / 1000;
+
+      if (isLocked) {
+        // Sürtünme & Yerçekimi
+        velocity.x -= velocity.x * 10.0 * delta;
+        velocity.z -= velocity.z * 10.0 * delta;
+        velocity.y -= 9.8 * 25.0 * delta;
+
+        direction.z = Number(moveForward) - Number(moveBackward);
+        direction.x = Number(moveRight) - Number(moveLeft);
+        direction.normalize();
+
+        if (moveForward || moveBackward) velocity.z -= direction.z * 120.0 * delta;
+        if (moveLeft || moveRight) velocity.x -= direction.x * 120.0 * delta;
+
+        camera.translateX(-velocity.x * delta);
+        camera.translateZ(velocity.z * delta);
+        camera.position.y += velocity.y * delta;
+
+        if (camera.position.y < 1.6) {
+          velocity.y = 0;
+          camera.position.y = 1.6;
+          canJump = true;
+        }
+
+        // --- BOT YAPAY ZEKASI GÜNCELLEMESİ ---
+        bots.forEach(bot => {
+          // Bot Oyuncuya Doğru Yürür
+          const botPos = bot.mesh.position;
+          const playerPos = camera.position;
+
+          const dist = botPos.distanceTo(playerPos);
+          if (dist > 5 && dist < 40) {
+            bot.mesh.lookAt(playerPos.x, botPos.y, playerPos.z);
+            bot.mesh.translateZ(3 * delta);
+          }
+
+          // Bot Ateş Etsin
+          if (dist < 25 && time - bot.lastShoot > 1500) {
+            bot.lastShoot = time;
+            playSound(300, 0.1);
+            hp = Math.max(0, hp - 10);
+            document.getElementById('hp-text').innerText = hp;
+            document.getElementById('hp-bar').style.width = hp + "%";
+
+            if (hp <= 0) {
+              alert("ÖLDÜN! Skorun: " + score);
+              location.reload();
+            }
+          }
+        });
+      }
+
+      prevTime = time;
+      renderer.render(scene, camera);
+    }
+
+    init();
+    animate();
+  </script>
+</body>
+</html>
